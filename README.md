@@ -1,13 +1,16 @@
-# Prism Ghost
+# Photon Comet
 
 A booth mini-game about mixing **light**, played with one finger.
 
-A small ghost made of light starts in a home ring. A crystal shows the target
-color it wants. Drag the ghost through pools of red, green, and blue light —
-real additive mixing, the way light actually works (red + green reads yellow).
-Your glowing trail follows you: cross your own trail and your color grows
-stronger; dip into shadow to dim it back down when you overshoot. Carry the
-target color home to score. As many matches as you can in about two minutes.
+A comet of light starts in a home ring, inside an Egyptian night temple.
+A crystal shows the color it wants — in color, not words. Fly the comet
+through three suns, red, green, and blue — real additive mixing, the way
+light actually works (red light + green light reads yellow). Your comet
+tail streams behind you: cross your own tail and your color grows
+stronger; drift too close to a black hole and it eats your light back
+down. Carry the target color home to score — the closer the match, the
+bigger the score, up to 200 — and grab sparkles on the way for bonuses.
+As many matches as you can in about two minutes.
 
 Built for the **Cloud9 x JetBrains "Sky's The Limit" Hackathon 2026**,
 Category 3 — Event Mini Game.
