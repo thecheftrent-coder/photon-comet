@@ -18,17 +18,17 @@ const TRAIL_MAX_POINTS = 42 // comet tail, lengthened a touch on Trent's word
 const GHOST_SPEED = 780 // px per second — the rock flies, it never teleports
 const STAR_POINTS = 25
 
-const TARGETS: { name: string; color: RGB }[] = [
-  { name: 'Sunbeam Yellow', color: { r: 1, g: 1, b: 0 } },
-  { name: 'Lagoon Cyan', color: { r: 0, g: 1, b: 1 } },
-  { name: 'Orchid Magenta', color: { r: 1, g: 0, b: 1 } },
-  { name: 'Tangerine', color: { r: 1, g: 0.5, b: 0 } },
-  { name: 'Mint', color: { r: 0.35, g: 1, b: 0.55 } },
-  { name: 'Sky', color: { r: 0.35, g: 0.65, b: 1 } },
-  { name: 'Rose', color: { r: 1, g: 0.45, b: 0.6 } },
-  { name: 'Pure White', color: { r: 1, g: 1, b: 1 } },
-  { name: 'Ember Red', color: { r: 1, g: 0.15, b: 0.1 } },
-  { name: 'Deep Violet', color: { r: 0.55, g: 0.25, b: 1 } },
+const TARGETS: { name: string; color: RGB; tier: number }[] = [
+  { name: 'Sunbeam Yellow', color: { r: 1, g: 1, b: 0 }, tier: 1 },
+  { name: 'Lagoon Cyan', color: { r: 0, g: 1, b: 1 }, tier: 1 },
+  { name: 'Orchid Magenta', color: { r: 1, g: 0, b: 1 }, tier: 1 },
+  { name: 'Pure White', color: { r: 1, g: 1, b: 1 }, tier: 1 },
+  { name: 'Ember Red', color: { r: 1, g: 0.15, b: 0.1 }, tier: 1 },
+  { name: 'Tangerine', color: { r: 1, g: 0.5, b: 0 }, tier: 2 },
+  { name: 'Deep Violet', color: { r: 0.55, g: 0.25, b: 1 }, tier: 2 },
+  { name: 'Mint', color: { r: 0.35, g: 1, b: 0.55 }, tier: 3 },
+  { name: 'Sky', color: { r: 0.35, g: 0.65, b: 1 }, tier: 3 },
+  { name: 'Rose', color: { r: 1, g: 0.45, b: 0.6 }, tier: 3 },
 ]
 
 function toColor(c: RGB): number {
@@ -69,18 +69,278 @@ function segmentsCross(
   return t > 0.05 && t < 0.95 && u > 0.05 && u < 0.95
 }
 
-function drawAnkh(
-  gfx: Phaser.GameObjects.Graphics,
-  cx: number,
-  cy: number,
-  s: number,
-  color: number,
-  alpha: number,
-) {
-  gfx.lineStyle(3, color, alpha)
-  gfx.strokeCircle(cx, cy - 8 * s, 5 * s)
-  gfx.lineBetween(cx, cy - 3 * s, cx, cy + 12 * s)
-  gfx.lineBetween(cx - 7 * s, cy + 1 * s, cx + 7 * s, cy + 1 * s)
+// SoundFX — every sound is synthesized live with Web Audio. No files.
+// The three suns sing one note each of a C major chord (red = root,
+// green = third, blue = fifth): mixing light literally builds a chord,
+// and full white is the whole chord sounding together.
+class SoundFX {
+  private ctx: AudioContext | null = null
+  private master: GainNode | null = null
+  private sunGain: Record<'r' | 'g' | 'b', GainNode> | null = null
+  private warmthOsc: OscillatorNode | null = null
+  private warmthGain: GainNode | null = null
+  private rumbleOsc: OscillatorNode[] = []
+  private rumbleGain: GainNode | null = null
+  private noiseBuf: AudioBuffer | null = null
+  private moonTimer = 0
+  private moonStep = 0
+  private sighTimer = 0
+  muted = false
+
+  private static NOTES = { r: 261.63, g: 329.63, b: 392.0 }
+
+  init() {
+    if (this.ctx) {
+      if (this.ctx.state === 'suspended') void this.ctx.resume()
+      return
+    }
+    if (!window.AudioContext) return
+    const ctx = new AudioContext()
+    this.ctx = ctx
+    this.master = ctx.createGain()
+    this.master.gain.value = this.muted ? 0 : 0.5
+    this.master.connect(ctx.destination)
+
+    // Ambient bed: three low notes breathing at the edge of hearing
+    const bed = ctx.createGain()
+    bed.gain.value = 0.016
+    bed.connect(this.master)
+    for (const f of [130.81, 196.0, 261.63]) {
+      const o = ctx.createOscillator()
+      o.type = 'sine'
+      o.frequency.value = f
+      o.connect(bed)
+      o.start()
+    }
+    const lfo = ctx.createOscillator()
+    lfo.frequency.value = 0.06
+    const lfoGain = ctx.createGain()
+    lfoGain.gain.value = 0.007
+    lfo.connect(lfoGain)
+    lfoGain.connect(bed.gain)
+    lfo.start()
+
+    // Sun tones
+    const mkSun = (freq: number): GainNode => {
+      const g = ctx.createGain()
+      g.gain.value = 0
+      g.connect(this.master!)
+      const o1 = ctx.createOscillator()
+      o1.type = 'sine'
+      o1.frequency.value = freq
+      o1.connect(g)
+      o1.start()
+      const o2 = ctx.createOscillator()
+      o2.type = 'triangle'
+      o2.frequency.value = freq * 2
+      const g2 = ctx.createGain()
+      g2.gain.value = 0.25
+      o2.connect(g2)
+      g2.connect(g)
+      o2.start()
+      return g
+    }
+    this.sunGain = {
+      r: mkSun(SoundFX.NOTES.r),
+      g: mkSun(SoundFX.NOTES.g),
+      b: mkSun(SoundFX.NOTES.b),
+    }
+
+    // Warmth shimmer
+    this.warmthOsc = ctx.createOscillator()
+    this.warmthOsc.type = 'sine'
+    this.warmthOsc.frequency.value = 1150
+    this.warmthGain = ctx.createGain()
+    this.warmthGain.gain.value = 0
+    this.warmthOsc.connect(this.warmthGain)
+    this.warmthGain.connect(this.master)
+    this.warmthOsc.start()
+
+    // Black hole rumble: two detuned lows through a lowpass
+    this.rumbleGain = ctx.createGain()
+    this.rumbleGain.gain.value = 0
+    const lp = ctx.createBiquadFilter()
+    lp.type = 'lowpass'
+    lp.frequency.value = 240
+    this.rumbleGain.connect(lp)
+    lp.connect(this.master)
+    for (const f of [55, 58.7]) {
+      const o = ctx.createOscillator()
+      o.type = 'sine'
+      o.frequency.value = f
+      o.connect(this.rumbleGain)
+      o.start()
+      this.rumbleOsc.push(o)
+    }
+
+    // Shared noise buffer for whooshes
+    const len = Math.floor(ctx.sampleRate * 0.3)
+    this.noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate)
+    const data = this.noiseBuf.getChannelData(0)
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1
+  }
+
+  setMuted(m: boolean) {
+    this.muted = m
+    if (this.ctx && this.master) {
+      this.master.gain.setTargetAtTime(m ? 0 : 0.5, this.ctx.currentTime, 0.03)
+    }
+  }
+
+  private bell(
+    freq: number,
+    delay: number,
+    dur: number,
+    vol: number,
+    type: OscillatorType = 'sine',
+  ) {
+    if (!this.ctx || !this.master) return
+    const ctx = this.ctx
+    const t0 = ctx.currentTime + delay
+    const o = ctx.createOscillator()
+    o.type = type
+    o.frequency.value = freq
+    const o2 = ctx.createOscillator()
+    o2.type = 'sine'
+    o2.frequency.value = freq * 2
+    const g = ctx.createGain()
+    g.gain.setValueAtTime(0, t0)
+    g.gain.linearRampToValueAtTime(vol, t0 + 0.012)
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur)
+    const g2 = ctx.createGain()
+    g2.gain.value = 0.35
+    o.connect(g)
+    o2.connect(g2)
+    g2.connect(g)
+    g.connect(this.master)
+    o.start(t0)
+    o2.start(t0)
+    o.stop(t0 + dur + 0.1)
+    o2.stop(t0 + dur + 0.1)
+  }
+
+  start() {
+    this.bell(523.25, 0, 0.5, 0.1)
+  }
+
+  end() {
+    ;[261.63, 329.63, 392.0, 523.25].forEach((f, i) =>
+      this.bell(f, i * 0.09, 1.6, 0.075),
+    )
+  }
+
+  tick() {
+    this.bell(740, 0, 0.07, 0.05, 'triangle')
+  }
+
+  ting() {
+    this.bell(1567.98, 0, 0.25, 0.1)
+    this.bell(2093, 0.05, 0.2, 0.045)
+  }
+
+  boost() {
+    if (!this.ctx || !this.master || !this.noiseBuf) return
+    const ctx = this.ctx
+    const src = ctx.createBufferSource()
+    src.buffer = this.noiseBuf
+    const bp = ctx.createBiquadFilter()
+    bp.type = 'bandpass'
+    bp.Q.value = 1.2
+    const t0 = ctx.currentTime
+    bp.frequency.setValueAtTime(500, t0)
+    bp.frequency.exponentialRampToValueAtTime(1900, t0 + 0.22)
+    const g = ctx.createGain()
+    g.gain.setValueAtTime(0, t0)
+    g.gain.linearRampToValueAtTime(0.085, t0 + 0.05)
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.28)
+    src.connect(bp)
+    bp.connect(g)
+    g.connect(this.master)
+    src.start(t0)
+    src.stop(t0 + 0.3)
+  }
+
+  deliver(quality: number, color: RGB) {
+    const chans = (['r', 'g', 'b'] as const).filter((ch) => color[ch] > 0.4)
+    const use = chans.length > 0 ? chans : (['r', 'g', 'b'] as const).filter((ch) => color[ch] > 0.12)
+    use.forEach((ch, i) => this.bell(SoundFX.NOTES[ch] * 2, i * 0.07, 0.8, 0.12))
+    if (quality >= 0.9) {
+      ;[1046.5, 1318.5, 1567.98].forEach((f, i) => this.bell(f, 0.18 + i * 0.06, 0.5, 0.06))
+    }
+  }
+
+  update(
+    s: {
+      sun: Record<'r' | 'g' | 'b', { inside: boolean; level: number }>
+      warmth: number
+      holeProx: number
+      inMoon: boolean
+      draining: boolean
+    },
+    dt: number,
+  ) {
+    if (!this.ctx || !this.sunGain || !this.warmthGain || !this.warmthOsc || !this.rumbleGain)
+      return
+    const now = this.ctx.currentTime
+    for (const ch of ['r', 'g', 'b'] as const) {
+      const target = s.sun[ch].inside ? 0.045 + s.sun[ch].level * 0.12 : 0
+      this.sunGain[ch].gain.setTargetAtTime(target, now, 0.09)
+    }
+    this.warmthGain.gain.setTargetAtTime(s.warmth * 0.045, now, 0.12)
+    this.warmthOsc.frequency.setTargetAtTime(1150 + s.warmth * 300, now, 0.2)
+    this.rumbleGain.gain.setTargetAtTime(s.holeProx * s.holeProx * 0.2, now, 0.15)
+    this.rumbleOsc.forEach((o, i) =>
+      o.frequency.setTargetAtTime((i === 0 ? 55 : 58.7) - s.holeProx * 13, now, 0.3),
+    )
+    if (s.inMoon) {
+      this.moonTimer -= dt
+      if (this.moonTimer <= 0) {
+        this.moonTimer = 2.2
+        const seq = [880, 1046.5, 1318.5, 1046.5]
+        this.bell(seq[this.moonStep % seq.length], 0, 1.1, 0.045)
+        this.moonStep += 1
+      }
+    } else {
+      this.moonTimer = Math.min(this.moonTimer, 0.3)
+    }
+    if (s.draining) {
+      this.sighTimer -= dt
+      if (this.sighTimer <= 0) {
+        this.sighTimer = 0.95
+        this.sigh()
+      }
+    } else {
+      this.sighTimer = Math.min(this.sighTimer, 0.2)
+    }
+  }
+
+  private sigh() {
+    if (!this.ctx || !this.master) return
+    const ctx = this.ctx
+    const t0 = ctx.currentTime
+    const o = ctx.createOscillator()
+    o.type = 'sine'
+    o.frequency.setValueAtTime(640, t0)
+    o.frequency.exponentialRampToValueAtTime(380, t0 + 0.4)
+    const g = ctx.createGain()
+    g.gain.setValueAtTime(0, t0)
+    g.gain.linearRampToValueAtTime(0.04, t0 + 0.06)
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.45)
+    o.connect(g)
+    g.connect(this.master)
+    o.start(t0)
+    o.stop(t0 + 0.5)
+  }
+
+  idle() {
+    if (!this.ctx || !this.sunGain || !this.warmthGain || !this.rumbleGain) return
+    const now = this.ctx.currentTime
+    for (const ch of ['r', 'g', 'b'] as const) {
+      this.sunGain[ch].gain.setTargetAtTime(0, now, 0.1)
+    }
+    this.warmthGain.gain.setTargetAtTime(0, now, 0.1)
+    this.rumbleGain.gain.setTargetAtTime(0, now, 0.1)
+  }
 }
 
 class GameScene extends Phaser.Scene {
@@ -100,7 +360,7 @@ class GameScene extends Phaser.Scene {
   private overlayText!: Phaser.GameObjects.Text
 
   private color: RGB = { r: 0, g: 0, b: 0 }
-  private target: { name: string; color: RGB } = TARGETS[0]
+  private target: { name: string; color: RGB; tier: number } = TARGETS[0]
   private trail: { x: number; y: number }[] = []
   private pools: { x: number; y: number; radius: number; channel: 'r' | 'g' | 'b' }[] = []
   private shadows: { x: number; y: number; radius: number }[] = []
@@ -114,6 +374,7 @@ class GameScene extends Phaser.Scene {
     parts: { ang: number; dist: number }[]
   }[] = []
   private home = { x: 450, y: 505, radius: 46 }
+  private moonlight = { x: 86, y: 300, radius: 52 }
   private facing = { x: 0, y: -1 }
 
   private dragging = false
@@ -124,6 +385,25 @@ class GameScene extends Phaser.Scene {
   private crossCooldown = 0
   private wasHome = false
   private starActive = false
+  private crystalGroup!: Phaser.GameObjects.Container
+  private streak = 0
+  private radianceLeft = 0
+  private radianceText!: Phaser.GameObjects.Text
+  private holeVis: {
+    halo: Phaser.GameObjects.Image
+    core: Phaser.GameObjects.Graphics
+    label: Phaser.GameObjects.Text
+  }[] = []
+  private holePos: { x: number; y: number }[] = []
+  private burstDots: Phaser.GameObjects.Image[] = []
+  private burstVel: { vx: number; vy: number; life: number; life0: number }[] = []
+  private burstRing!: Phaser.GameObjects.Arc
+  private introGroup!: Phaser.GameObjects.Container
+  private phaseAnnounced = 0
+  private best = 0
+  private sfx = new SoundFX()
+  private muteText!: Phaser.GameObjects.Text
+  private lastTickSec = -1
 
   constructor() {
     super('game')
@@ -178,14 +458,38 @@ class GameScene extends Phaser.Scene {
 
     this.drawBackground(width, height)
 
+    // --- Moonlight pool: pale light that lifts every color toward white ---
+    const ml = this.moonlight
+    const shaft = this.add.graphics()
+    shaft.fillStyle(0xcfd8ff, 0.05)
+    shaft.fillTriangle(48, 84, 84, 84, ml.x + 34, ml.y - 20)
+    shaft.fillTriangle(48, 84, ml.x - 34, ml.y - 20, ml.x + 34, ml.y - 20)
+    const mlGlow = this.add.image(ml.x, ml.y, 'glow')
+    mlGlow.setDisplaySize(ml.radius * 2.5, ml.radius * 2.5)
+    mlGlow.setTint(0xcfd8ff)
+    mlGlow.setAlpha(0.3)
+    mlGlow.setBlendMode(Phaser.BlendModes.ADD)
+    const mlRing = this.add.graphics()
+    mlRing.lineStyle(2, 0xcfd8ff, 0.5)
+    mlRing.strokeCircle(ml.x, ml.y, ml.radius)
+    mlRing.lineStyle(1, 0xcfd8ff, 0.22)
+    mlRing.strokeCircle(ml.x, ml.y, ml.radius + 7)
+    this.add
+      .text(ml.x, ml.y + ml.radius + 16, 'MOONLIGHT', {
+        fontFamily: 'system-ui, sans-serif',
+        fontSize: '11px',
+        color: '#aab6dd',
+      })
+      .setOrigin(0.5)
+
     // --- Black holes: singularities that eat your light ---
     this.shadows = [
       { x: 130, y: 445, radius: 58 },
       { x: 775, y: 445, radius: 58 },
     ]
-    const coreGfx = this.add.graphics().setDepth(1)
     this.holeGfx = this.add.graphics().setDepth(2)
     for (const s of this.shadows) {
+      const coreGfx = this.add.graphics().setDepth(1)
       // Hot halo, slowly breathing
       const halo = this.add.image(s.x, s.y, 'glow')
       halo.setDisplaySize(s.radius * 3.6, s.radius * 3.6)
@@ -203,20 +507,24 @@ class GameScene extends Phaser.Scene {
         repeat: -1,
         ease: 'Sine.easeInOut',
       })
-      // The void itself, ringed by bent light
+      // The void itself, ringed by bent light (drawn local, positioned
+      // on the hole so the whole singularity can drift late in a round)
       coreGfx.fillStyle(0x000000, 1)
-      coreGfx.fillCircle(s.x, s.y, s.radius * 0.55)
+      coreGfx.fillCircle(0, 0, s.radius * 0.55)
       coreGfx.lineStyle(2, 0xbfd4ff, 0.55)
-      coreGfx.strokeCircle(s.x, s.y, s.radius * 0.6)
+      coreGfx.strokeCircle(0, 0, s.radius * 0.6)
       coreGfx.lineStyle(1, 0xbfd4ff, 0.2)
-      coreGfx.strokeCircle(s.x, s.y, s.radius * 0.74)
-      this.add
+      coreGfx.strokeCircle(0, 0, s.radius * 0.74)
+      coreGfx.setPosition(s.x, s.y)
+      const label = this.add
         .text(s.x, s.y + s.radius + 22, 'SINGULARITY', {
           fontFamily: 'system-ui, sans-serif',
           fontSize: '11px',
           color: '#d98a7a',
         })
         .setOrigin(0.5)
+      this.holeVis.push({ halo, core: coreGfx, label })
+      this.holePos.push({ x: s.x, y: s.y })
       const seeds: { jit: number; size: number }[] = []
       for (let i = 0; i < 44; i++) {
         seeds.push({
@@ -333,6 +641,7 @@ class GameScene extends Phaser.Scene {
 
     // --- The crystal: a faceted gem that IS the target color ---
     const crystalGroup = this.add.container(width / 2, 92)
+    this.crystalGroup = crystalGroup
     this.crystalGlow = this.add.image(0, 0, 'glow')
     this.crystalGlow.setDisplaySize(150, 150)
     this.crystalGlow.setBlendMode(Phaser.BlendModes.ADD)
@@ -394,6 +703,26 @@ class GameScene extends Phaser.Scene {
         color: '#8b93b8',
       })
       .setOrigin(1, 0)
+    this.radianceText = this.add
+      .text(width - 24, 84, '', {
+        fontFamily: 'system-ui, sans-serif',
+        fontSize: '15px',
+        color: '#ffd76a',
+      })
+      .setOrigin(1, 0)
+    try {
+      this.sfx.muted = localStorage.getItem('photon-comet-muted') === '1'
+    } catch {
+      this.sfx.muted = false
+    }
+    this.muteText = this.add
+      .text(18, height - 16, this.sfx.muted ? 'SOUND OFF' : 'SOUND ON', {
+        fontFamily: 'system-ui, sans-serif',
+        fontSize: '12px',
+        color: '#8b93b8',
+      })
+      .setOrigin(0, 1)
+      .setDepth(20)
     this.messageText = this.add
       .text(width / 2, height - 26, '', {
         fontFamily: 'system-ui, sans-serif',
@@ -410,6 +739,18 @@ class GameScene extends Phaser.Scene {
       })
       .setOrigin(0.5)
       .setDepth(20)
+
+    // --- Delivery burst pool ---
+    for (let i = 0; i < 16; i++) {
+      const dot = this.add.image(-200, -200, 'star')
+      dot.setVisible(false)
+      dot.setDepth(15)
+      this.burstDots.push(dot)
+      this.burstVel.push({ vx: 0, vy: 0, life: 0, life0: 1 })
+    }
+    this.burstRing = this.add.circle(this.home.x, this.home.y, this.home.radius, 0xffffff, 0)
+    this.burstRing.setVisible(false)
+    this.burstRing.setDepth(14)
 
     // --- Trail layer ---
     this.trailGfx = this.add.graphics().setDepth(5)
@@ -429,6 +770,18 @@ class GameScene extends Phaser.Scene {
 
     // --- Input: hold and drag; the rock flies to your finger ---
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      this.sfx.init()
+      // The SOUND ON/OFF corner is a button, not a flight command
+      if (p.x < 130 && p.y > this.scale.height - 48) {
+        this.sfx.setMuted(!this.sfx.muted)
+        try {
+          localStorage.setItem('photon-comet-muted', this.sfx.muted ? '1' : '0')
+        } catch {
+          // storage unavailable — mute still applies this session
+        }
+        this.muteText.setText(this.sfx.muted ? 'SOUND OFF' : 'SOUND ON')
+        return
+      }
       if (!this.playing) {
         this.startRound()
         return
@@ -444,7 +797,58 @@ class GameScene extends Phaser.Scene {
       this.pointerTarget = null
     })
 
-    this.overlayText.setText('PHOTON COMET\n\nTap to start')
+    // --- Picture instructions: red sun + green sun -> yellow comet -> home ---
+    const intro = this.add.container(0, 0).setDepth(19)
+    const mkSun = (x: number, hex: number) => {
+      const raysImg = this.add.image(x, 432, 'rays')
+      raysImg.setDisplaySize(56, 56)
+      raysImg.setTint(hex)
+      raysImg.setAlpha(0.85)
+      raysImg.setBlendMode(Phaser.BlendModes.ADD)
+      const coreDot = this.add.circle(x, 432, 10, tintTowardWhite(hex, 0.5), 1)
+      intro.add([raysImg, coreDot])
+    }
+    mkSun(262, 0xff2a1a)
+    intro.add(
+      this.add
+        .text(298, 432, '+', { fontFamily: 'system-ui, sans-serif', fontSize: '22px', color: '#e8ebff' })
+        .setOrigin(0.5),
+    )
+    mkSun(338, 0x22ff66)
+    intro.add(
+      this.add
+        .text(382, 432, '→', { fontFamily: 'system-ui, sans-serif', fontSize: '22px', color: '#e8ebff' })
+        .setOrigin(0.5),
+    )
+    const cometGlow = this.add.image(424, 432, 'glow')
+    cometGlow.setDisplaySize(42, 42)
+    cometGlow.setTint(0xffff22)
+    cometGlow.setBlendMode(Phaser.BlendModes.ADD)
+    intro.add(cometGlow)
+    intro.add(
+      this.add
+        .text(468, 432, '→', { fontFamily: 'system-ui, sans-serif', fontSize: '22px', color: '#e8ebff' })
+        .setOrigin(0.5),
+    )
+    const introRing = this.add.circle(514, 432, 17, 0xffffff, 0)
+    introRing.setStrokeStyle(2, 0xcfd6ff, 0.9)
+    const introDot = this.add.circle(514, 432, 6, 0xffff22, 1)
+    intro.add([introRing, introDot])
+    intro.add(
+      this.add
+        .text(514, 462, '+100', { fontFamily: 'system-ui, sans-serif', fontSize: '14px', color: '#ffd76a' })
+        .setOrigin(0.5),
+    )
+    this.introGroup = intro
+
+    try {
+      this.best = Number(localStorage.getItem('photon-comet-best') || 0) || 0
+    } catch {
+      this.best = 0
+    }
+    this.overlayText.setText(
+      `PHOTON COMET\n\nTap to start${this.best > 0 ? `\n\nBest: ${this.best}` : ''}`,
+    )
     this.newTarget()
   }
 
@@ -475,21 +879,9 @@ class GameScene extends Phaser.Scene {
     bg.lineStyle(2, 0xc9a227, 0.35)
     bg.lineBetween(250, 468, 340, 356)
     bg.lineBetween(480, 468, 560, 386)
-    // Temple pillars at the edges
-    for (const px of [16, width - 42]) {
-      bg.fillStyle(0x3a2a16, 1)
-      bg.fillRect(px, 96, 26, 428)
-      bg.fillStyle(0xc9a227, 0.75)
-      bg.fillRect(px - 3, 84, 32, 12)
-      bg.fillRect(px - 3, 524, 32, 12)
-      bg.fillStyle(0x241806, 1)
-      bg.fillRect(px + 11, 96, 4, 428)
-    }
-    // Gold frame + ankhs in the bottom corners
+    // Gold frame
     bg.lineStyle(2, 0xc9a227, 0.45)
     bg.strokeRect(6, 6, width - 12, height - 12)
-    drawAnkh(bg, 34, height - 40, 1, 0xc9a227, 0.8)
-    drawAnkh(bg, width - 34, height - 40, 1, 0xc9a227, 0.8)
   }
 
   private drawCrystal() {
@@ -558,6 +950,7 @@ class GameScene extends Phaser.Scene {
             this.color.b = Phaser.Math.Clamp(this.color.b * CROSS_BOOST, 0, 1)
             this.crossCooldown = 0.6
             this.flash('Trail crossed — color strengthened!')
+            this.sfx.boost()
             break
           }
         }
@@ -606,11 +999,56 @@ class GameScene extends Phaser.Scene {
     })
   }
 
+  private toleranceNow(): number {
+    const elapsed = ROUND_SECONDS - this.timeLeft
+    if (elapsed < 40) return 0.2
+    if (elapsed < 85) return TOLERANCE
+    return 0.15
+  }
+
   private newTarget() {
-    const pick = Phaser.Utils.Array.GetRandom(TARGETS) as { name: string; color: RGB }
+    const elapsed = ROUND_SECONDS - this.timeLeft
+    const maxTier = elapsed < 40 ? 1 : elapsed < 85 ? 2 : 3
+    const pool = TARGETS.filter((t) => t.tier <= maxTier)
+    const pick = Phaser.Utils.Array.GetRandom(pool) as {
+      name: string
+      color: RGB
+      tier: number
+    }
     this.target = pick
     this.targetText.setText(pick.name)
     this.drawCrystal()
+  }
+
+  private fireBurst(colorHex: number) {
+    const ring = this.burstRing
+    ring.setPosition(this.home.x, this.home.y)
+    ring.setStrokeStyle(3, colorHex, 0.9)
+    ring.setScale(1)
+    ring.setAlpha(1)
+    ring.setVisible(true)
+    this.tweens.add({
+      targets: ring,
+      scale: 2.3,
+      alpha: 0,
+      duration: 480,
+      ease: 'Cubic.easeOut',
+      onComplete: () => ring.setVisible(false),
+    })
+    for (let i = 0; i < this.burstDots.length; i++) {
+      const dot = this.burstDots[i]
+      const v = this.burstVel[i]
+      const ang = Phaser.Math.FloatBetween(0, Math.PI * 2)
+      const speed = Phaser.Math.FloatBetween(90, 270)
+      v.vx = Math.cos(ang) * speed
+      v.vy = Math.sin(ang) * speed
+      v.life = v.life0 = Phaser.Math.FloatBetween(0.45, 0.8)
+      dot.setPosition(this.home.x, this.home.y)
+      dot.setTint(colorHex)
+      dot.setDisplaySize(Phaser.Math.Between(9, 18), Phaser.Math.Between(9, 18))
+      dot.setAlpha(1)
+      dot.setVisible(true)
+    }
   }
 
   private spawnStar() {
@@ -639,9 +1077,15 @@ class GameScene extends Phaser.Scene {
     this.trail = []
     this.dragging = false
     this.pointerTarget = null
+    this.streak = 0
+    this.radianceLeft = 0
+    this.phaseAnnounced = 0
+    this.lastTickSec = -1
+    this.sfx.start()
     this.ghost.setPosition(this.home.x, this.home.y)
     this.ghostRing.setPosition(this.home.x, this.home.y)
     this.overlayText.setText('')
+    this.introGroup.setVisible(false)
     this.newTarget()
     this.spawnStar()
     this.flash('Match the crystal, then bring it home!')
@@ -650,7 +1094,43 @@ class GameScene extends Phaser.Scene {
   update(_time: number, deltaMs: number) {
     const dt = Math.min(deltaMs / 1000, 0.05)
     this.crossCooldown = Math.max(0, this.crossCooldown - dt)
+
+    // Black holes drift late in the round; every visual follows
+    const elapsed0 = ROUND_SECONDS - this.timeLeft
+    for (let i = 0; i < this.shadows.length; i++) {
+      const s = this.shadows[i]
+      if (this.playing && elapsed0 > 75) {
+        const t = this.time.now / 1000
+        this.holePos[i].x = s.x + Math.sin(t * 0.24 + i * 2.1) * 26
+        this.holePos[i].y = s.y + Math.cos(t * 0.19 + i * 1.7) * 16
+      } else {
+        this.holePos[i].x = s.x
+        this.holePos[i].y = s.y
+      }
+      this.holes[i].cx = this.holePos[i].x
+      this.holes[i].cy = this.holePos[i].y
+      const vis = this.holeVis[i]
+      vis.halo.setPosition(this.holePos[i].x, this.holePos[i].y)
+      vis.core.setPosition(this.holePos[i].x, this.holePos[i].y)
+      vis.label.setPosition(this.holePos[i].x, this.holePos[i].y + s.radius + 22)
+    }
     this.animateHoles(dt)
+
+    // Delivery burst particles
+    for (let i = 0; i < this.burstDots.length; i++) {
+      const v = this.burstVel[i]
+      if (v.life <= 0) continue
+      v.life -= dt
+      const dot = this.burstDots[i]
+      if (v.life <= 0) {
+        dot.setVisible(false)
+        continue
+      }
+      v.vx *= 1 - 2.4 * dt
+      v.vy *= 1 - 2.4 * dt
+      dot.setPosition(dot.x + v.vx * dt, dot.y + v.vy * dt)
+      dot.setAlpha(Math.min(1, v.life / v.life0 + 0.25))
+    }
 
     // Ghost, eyes and swatch always show the current state
     const col = toColor(this.color)
@@ -661,7 +1141,27 @@ class GameScene extends Phaser.Scene {
     this.eyeL.setPosition(ex - 6, ey - 2)
     this.eyeR.setPosition(ex + 6, ey - 2)
 
-    if (!this.playing) return
+    // The crystal warms — brighter, bigger, faster — as your color
+    // nears its own
+    let warmth = 0
+    if (this.playing && this.color.r + this.color.g + this.color.b > 0.15) {
+      const t = this.target.color
+      const meanErr =
+        (Math.abs(this.color.r - t.r) +
+          Math.abs(this.color.g - t.g) +
+          Math.abs(this.color.b - t.b)) /
+        3
+      warmth = Phaser.Math.Clamp(1 - meanErr / 0.55, 0, 1)
+    }
+    this.crystalGlow.setAlpha(0.45 + warmth * 0.5)
+    const pulse =
+      Math.sin(this.time.now / (400 - warmth * 240)) * (0.02 + warmth * 0.045)
+    this.crystalGroup.setScale(1 + warmth * 0.1 + pulse)
+
+    if (!this.playing) {
+      this.sfx.idle()
+      return
+    }
 
     // Timer
     this.timeLeft -= dt
@@ -671,10 +1171,53 @@ class GameScene extends Phaser.Scene {
       this.dragging = false
       this.star.setVisible(false)
       this.starActive = false
-      this.overlayText.setText(`TIME!\nFinal score: ${this.score}\n\nTap to play again`)
+      this.sfx.end()
+      let bestLine = ''
+      if (this.score > this.best) {
+        this.best = this.score
+        try {
+          localStorage.setItem('photon-comet-best', String(this.best))
+        } catch {
+          // storage unavailable — the score still counts this session
+        }
+        bestLine = '\nNEW BEST!'
+      } else if (this.best > 0) {
+        bestLine = `\nBest: ${this.best}`
+      }
+      this.overlayText.setText(
+        `TIME!\nFinal score: ${this.score}${bestLine}\n\nTap to play again`,
+      )
+      this.introGroup.setVisible(true)
     }
     this.timeText.setText(`TIME ${Math.ceil(this.timeLeft)}`)
     this.scoreText.setText(`SCORE ${this.score}`)
+    const wholeSec = Math.ceil(this.timeLeft)
+    if (wholeSec <= 10 && wholeSec >= 1 && wholeSec !== this.lastTickSec) {
+      this.lastTickSec = wholeSec
+      this.sfx.tick()
+    }
+
+    // Radiance streak timer
+    if (this.radianceLeft > 0) {
+      this.radianceLeft = Math.max(0, this.radianceLeft - dt)
+      if (this.radianceLeft === 0) this.streak = 0
+    }
+    this.radianceText.setText(
+      this.radianceLeft > 0
+        ? `RADIANCE ${Math.ceil(this.radianceLeft)}s — 2x SCORE`
+        : '',
+    )
+
+    // Round phases announce themselves once each
+    const elapsed = ROUND_SECONDS - this.timeLeft
+    if (elapsed >= 40 && this.phaseAnnounced < 1) {
+      this.phaseAnnounced = 1
+      this.flash('The crystal grows fussier — trickier colors now')
+    }
+    if (elapsed >= 75 && this.phaseAnnounced < 2) {
+      this.phaseAnnounced = 2
+      this.flash('The black holes are drifting…')
+    }
 
     // The rock flies toward your finger at a set speed — no teleporting
     if (this.dragging && this.pointerTarget) {
@@ -690,12 +1233,38 @@ class GameScene extends Phaser.Scene {
       }
     }
 
+    // Singularity gravity: the closer you drift, the harder it pulls —
+    // always escapable at full flight speed, never ignorable
+    let holeProx = 0
+    for (let i = 0; i < this.shadows.length; i++) {
+      const hp = this.holePos[i]
+      const d = Phaser.Math.Distance.Between(this.ghost.x, this.ghost.y, hp.x, hp.y)
+      const influence = this.shadows[i].radius * 2.7
+      holeProx = Math.max(holeProx, Phaser.Math.Clamp(1 - d / influence, 0, 1))
+      if (d < influence && d > 4) {
+        const t = Phaser.Math.Clamp(
+          1 -
+            (d - this.shadows[i].radius * 0.55) /
+              (influence - this.shadows[i].radius * 0.55),
+          0,
+          1,
+        )
+        const pull = (30 + t * t * 320) * dt
+        this.stepGhost(
+          this.ghost.x + ((hp.x - this.ghost.x) / d) * pull,
+          this.ghost.y + ((hp.y - this.ghost.y) / d) * pull,
+        )
+      }
+    }
+
     const gx = this.ghost.x
     const gy = this.ghost.y
 
     // Pools add their channel
+    const sunIn = { r: false, g: false, b: false }
     for (const p of this.pools) {
       if (Phaser.Math.Distance.Between(gx, gy, p.x, p.y) < p.radius) {
+        sunIn[p.channel] = true
         this.color[p.channel] = Phaser.Math.Clamp(
           this.color[p.channel] + POOL_RATE * dt,
           0,
@@ -703,14 +1272,30 @@ class GameScene extends Phaser.Scene {
         )
       }
     }
-    // Shadow dims everything
-    for (const s of this.shadows) {
-      if (Phaser.Math.Distance.Between(gx, gy, s.x, s.y) < s.radius) {
+    // Black holes eat your light
+    let draining = false
+    for (let i = 0; i < this.shadows.length; i++) {
+      const hp = this.holePos[i]
+      if (Phaser.Math.Distance.Between(gx, gy, hp.x, hp.y) < this.shadows[i].radius) {
+        draining = this.color.r + this.color.g + this.color.b > 0.1
         const f = Math.max(0, 1 - SHADOW_RATE * dt)
         this.color.r *= f
         this.color.g *= f
         this.color.b *= f
       }
+    }
+    // Moonlight lifts every channel evenly toward white — a gentle way
+    // to pale a mix down, or to climb to white the slow way
+    let inMoon = false
+    if (
+      Phaser.Math.Distance.Between(gx, gy, this.moonlight.x, this.moonlight.y) <
+      this.moonlight.radius
+    ) {
+      inMoon = true
+      const lift = 0.22 * dt
+      this.color.r = Phaser.Math.Clamp(this.color.r + lift, 0, 1)
+      this.color.g = Phaser.Math.Clamp(this.color.g + lift, 0, 1)
+      this.color.b = Phaser.Math.Clamp(this.color.b + lift, 0, 1)
     }
 
     // Sparkle pickup
@@ -721,6 +1306,7 @@ class GameScene extends Phaser.Scene {
       this.score += STAR_POINTS
       this.starActive = false
       this.star.setVisible(false)
+      this.sfx.ting()
       this.flash(`Sparkle! +${STAR_POINTS}`)
       this.time.delayedCall(1100, () => {
         if (this.playing) this.spawnStar()
@@ -735,26 +1321,69 @@ class GameScene extends Phaser.Scene {
       const errR = Math.abs(this.color.r - t.r)
       const errG = Math.abs(this.color.g - t.g)
       const errB = Math.abs(this.color.b - t.b)
-      const match = errR <= TOLERANCE && errG <= TOLERANCE && errB <= TOLERANCE
+      const tol = this.toleranceNow()
+      const match = errR <= tol && errG <= tol && errB <= tol
       const hasColor = this.color.r + this.color.g + this.color.b > 0.15
       if (match) {
         const meanErr = (errR + errG + errB) / 3
-        const quality = Phaser.Math.Clamp(1 - meanErr / TOLERANCE, 0, 1)
-        const points = 100 + Math.round(100 * quality)
+        const quality = Phaser.Math.Clamp(1 - meanErr / tol, 0, 1)
+        let points = 100 + Math.round(100 * quality)
+        if (this.radianceLeft > 0) points *= 2
         this.score += points
-        if (quality >= 0.9) this.flash(`PERFECT MATCH! +${points}`)
-        else if (quality >= 0.5) this.flash(`Great match! +${points}`)
-        else this.flash(`Delivered! +${points}`)
+        this.fireBurst(toColor(t))
+        this.sfx.deliver(quality, t)
+        this.streak += 1
+        const triggersRadiance = this.streak >= 3 && this.radianceLeft <= 0
+        if (triggersRadiance) {
+          this.radianceLeft = 10
+          this.flash(`RADIANCE! +${points} — double score for 10 seconds!`)
+        } else if (quality >= 0.9) {
+          this.flash(`PERFECT MATCH! +${points}`)
+        } else if (quality >= 0.5) {
+          this.flash(`Great match! +${points}`)
+        } else {
+          this.flash(`Delivered! +${points}`)
+        }
         this.color = { r: 0, g: 0, b: 0 }
         this.trail = []
         this.newTarget()
       } else if (hasColor) {
+        this.streak = 0
         this.flash("Not the crystal's color yet — adjust and come back")
       }
     }
     this.wasHome = atHome
 
-    // Comet tail: plump at the ghost, tapering and fading to a point
+    // The singularities drink the tail: nearby points stream inward,
+    // faster the closer they get, and vanish into the void
+    if (this.trail.length > 0) {
+      const kept: { x: number; y: number }[] = []
+      for (const tp of this.trail) {
+        let eaten = false
+        for (let i = 0; i < this.shadows.length; i++) {
+          const hp = this.holePos[i]
+          const d = Phaser.Math.Distance.Between(tp.x, tp.y, hp.x, hp.y)
+          const core = this.shadows[i].radius * 0.55
+          if (d < core) {
+            eaten = true
+            break
+          }
+          const influence = this.shadows[i].radius * 2.2
+          if (d < influence && d > 1) {
+            const t = Phaser.Math.Clamp(1 - (d - core) / (influence - core), 0, 1)
+            const pull = Math.min((25 + t * t * 430) * dt, d)
+            tp.x += ((hp.x - tp.x) / d) * pull
+            tp.y += ((hp.y - tp.y) / d) * pull
+          }
+        }
+        if (!eaten) kept.push(tp)
+      }
+      this.trail = kept
+    }
+
+    // Comet tail: plump at the ghost, tapering and fading to a point —
+    // under Radiance it blazes white-gold
+    const tailCol = this.radianceLeft > 0 ? tintTowardWhite(col, 0.55) : col
     this.trailGfx.clear()
     if (this.trail.length > 1) {
       const pts = [...this.trail, { x: gx, y: gy }]
@@ -762,7 +1391,7 @@ class GameScene extends Phaser.Scene {
         const t = i / (pts.length - 1) // 0 = tail tip, 1 = at the ghost
         const radius = 1.2 + Math.pow(t, 1.6) * 11.5
         const alpha = 0.06 + t * 0.5
-        this.trailGfx.fillStyle(col, alpha)
+        this.trailGfx.fillStyle(tailCol, alpha)
         this.trailGfx.fillCircle(pts[i].x, pts[i].y, radius)
         if (i > 0) {
           // Midpoint circle keeps the tail smooth, not beaded
@@ -772,6 +1401,22 @@ class GameScene extends Phaser.Scene {
         }
       }
     }
+
+    // Sound follows the state of play
+    this.sfx.update(
+      {
+        sun: {
+          r: { inside: sunIn.r, level: this.color.r },
+          g: { inside: sunIn.g, level: this.color.g },
+          b: { inside: sunIn.b, level: this.color.b },
+        },
+        warmth,
+        holeProx,
+        inMoon,
+        draining,
+      },
+      dt,
+    )
   }
 }
 
